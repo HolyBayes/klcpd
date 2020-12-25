@@ -3,7 +3,7 @@
 
 **KL-CPD** is an algorithm for change point and anomaly detection in time series.
 
-More information can be found in the 2019 (https://openreview.net/forum?id=r1GbfhRqF7)[paper] *Kernel Change-point Detection with Auxiliary Deep Generative Models*.
+More information can be found in the 2019 [paper](https://openreview.net/forum?id=r1GbfhRqF7) *Kernel Change-point Detection with Auxiliary Deep Generative Models*.
 
 ## Usage
 
