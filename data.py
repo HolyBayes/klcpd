@@ -53,12 +53,16 @@ class HankelDataset(Dataset):
         return self.T
 
     def __getitem__(self, idx):
-        data = np.zeros(self.p_wnd_dim + self.T + self.f_wnd_dim, self.var_dim)
-        data[:self.p_wnd_dim,:] = self.Y_hankel[0,:] # left padding
-        data[self.p_wnd_dim:self.p_wnd_dim+self.T] = self.Y_hankel[:,:]
-        data[-self.f_wnd_dim:] = self.Y_hankel[-1,:] # right padding
+        if idx < 0: idx += len(self)
+        assert(0 <= idx < len(self))
+        data = np.concatenate([
+            np.tile(self.Y_hankel[:1,:], (self.p_wnd_dim, 1)), # left padding
+            self.Y_hankel[:, :], # timeseries
+            np.tile(self.Y_hankel[-1:,:], (self.f_wnd_dim, 1)), # right padding
+            ])
+        print(data[:self.p_wnd_dim+1])
         return {
-            'X_p': torch.from_numpy(data[idx-self.p_wnd_dim:idx, :]),
-            'X_f': torch.from_numpy(data[idx:idx+self.f_wnd_dim, :]),
+            'X_p': torch.from_numpy(data[idx:idx+self.p_wnd_dim, :]),
+            'X_f': torch.from_numpy(data[idx+self.p_wnd_dim:idx+self.p_wnd_dim+self.f_wnd_dim, :]),
             'Y': torch.from_numpy(self.Y[min(max(idx, 0), self.T-1)])
         }
