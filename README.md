@@ -8,6 +8,8 @@ More information can be found in the 2019 [paper](https://openreview.net/forum?i
 ## Usage
 
 ```python
+from model import KL_CPD
+
 dim, seq_length = 1, 100
 ts = np.random.randn(seq_length,dim)
 device = torch.device('cuda')
