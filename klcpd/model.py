@@ -13,7 +13,7 @@ from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 from sklearn.metrics.pairwise import euclidean_distances
 
-from data import HankelDataset
+from .data import HankelDataset
 from types import SimpleNamespace
 from tqdm import trange
 from torch.utils.data import DataLoader
