@@ -2,15 +2,10 @@
 #!/usr/bin/env python
 # encoding: utf-8
 
-from __future__ import print_function
-import argparse
-import cPickle as pickle
 import math
 import numpy as np
-import os
 import random
 import sklearn.metrics
-import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,10 +13,10 @@ from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 from sklearn.metrics.pairwise import euclidean_distances
 
-from data_loader import DataLoader
-from optim import Optim
+from data import HankelDataset
 from types import SimpleNamespace
 from tqdm import trange
+from torch.utils.data import DataLoader
 
 
 def median_heuristic(X, beta=0.5):
@@ -32,7 +27,7 @@ def median_heuristic(X, beta=0.5):
     return [med_sqdist * b for b in beta_list]
 
 class NetG(nn.Module):
-    def __init__(self, var_dim, RNN_hid_dim:int=10, num_layers:int=1):
+    def __init__(self, var_dim, RNN_hid_dim, num_layers:int=1):
         super().__init__()
         self.var_dim = var_dim
         self.RNN_hid_dim = RNN_hid_dim
@@ -61,7 +56,7 @@ class NetG(nn.Module):
 
 
 class NetD(nn.Module):
-    def __init__(self, var_dim, RNN_hid_dim:int=10, num_layers:int=1):
+    def __init__(self, var_dim, RNN_hid_dim, num_layers:int=1):
         super(NetD, self).__init__()
 
         self.var_dim = var_dim
@@ -77,23 +72,20 @@ class NetD(nn.Module):
 
 
 class KL_CPD(nn.Module):
-    def __init__(self, critic_iters:int, lambda_ae:float=0.001, lambda_real:float=0.1):
+    def __init__(self, D:int, critic_iters:int=5,
+            lambda_ae:float=0.001, lambda_real:float=0.1,
+            p_wnd_dim:int=25, f_wnd_dim:int=10, sub_dim:int=1, RNN_hid_dim:int=10):
         super().__init__()
-        self.netD = NetD(var_dim)
-        self.netG = NetG(var_dim)
+        self.p_wnd_dim = p_wnd_dim
+        self.f_wnd_dim = f_wnd_dim
+        self.sub_dim = sub_dim
+        self.D = D
+        self.var_dim = D * sub_dim
         self.critic_iters = critic_iters
-
-        # must be defined in fit() method
-        optG = torch.optim.AdamW(self.netG.parameters(), lr=lr,
-                   weight_decay=weight_decay,
-                   momentum=momentum)
-
-        optD = torch.optim.AdamW(self.netD.parameters(), lr=lr,
-                   weight_decay=weight_decay,
-                   momentum=momentum)
-
-        torch.nn.utils.clip_grad_norm_(self.netG.parameters(), grad_clip)
-
+        self.lambda_ae, self.lambda_real = lambda_ae, lambda_real
+        self.RNN_hid_dim = RNN_hid_dim
+        self.netD = NetD(self.var_dim, RNN_hid_dim)
+        self.netG = NetG(self.var_dim, RNN_hid_dim)
 
 
     @property
@@ -135,54 +127,73 @@ class KL_CPD(nn.Module):
         batch_size = X_p.size(0)
 
         X_p_enc, _ = self.netD(X_p)
-        X_f_enc, _ = sself.netD(X_f)
-        Y_pred_batch = self.batch_mmd2_loss(X_p_enc, X_f_enc, sigma_var)
+        X_f_enc, _ = self.netD(X_f)
+        Y_pred_batch = self.__mmd2_loss(X_p_enc, X_f_enc)
 
-        raise Y_pred_batch
+        return Y_pred_batch
 
     def predict(self, ts):
+        dataset = HankelDataset(ts, self.p_wnd_dim, self.f_wnd_dim, self.sub_dim)
+        dataloader = DataLoader(dataset, batch_size=128, shuffle=False)
+        preds = []
+        with torch.no_grad():
+            for batch in dataloader:
+                X_p, X_f = [batch[key].float().to(self.device) for key in ['X_p', 'X_f']]
+                preds.append(self.forward(X_p, X_f).detach().cpu().numpy())
+        return np.concatenate(preds)
 
 
-    def fit(self, ts, epoches):
 
-        sigma_list = median_heuristic(Data.Y_hankel, beta=.5)
+    def fit(self, ts, epoches:int=100,lr:float=3e-4,weight_clip:float=.1,weight_decay:float=0.,momentum:float=0.):
+        # must be defined in fit() method
+        optG = torch.optim.AdamW(self.netG.parameters(),lr=lr,weight_decay=weight_decay)
+
+        optD = torch.optim.AdamW(self.netD.parameters(),lr=lr,weight_decay=weight_decay)
+
+
+        dataset = HankelDataset(ts, self.p_wnd_dim, self.f_wnd_dim, self.sub_dim)
+        dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+        sigma_list = median_heuristic(dataset.Y_hankel, beta=.5)
         self.sigma_var = torch.FloatTensor(sigma_list).to(self.device)
+
 
         tbar = trange(epoches)
         for epoch in tbar:
-            for i, batch in enumerate(train_loader):
+            for batch in dataloader:
                 # Fit critic
-                for p in netD.parameters():
+                for p in self.netD.parameters():
                     p.requires_grad = True
-                self._optimizeD()
+                for p in self.netD.rnn_enc_layer.parameters():
+                    p.data.clamp_(-weight_clip, weight_clip)
+                self._optimizeD(batch, optD)
                 if np.random.choice(np.arange(self.critic_iters)) == 0:
-                    for p in netD.parameters():
+                    # Fit generator
+                    for p in self.netD.parameters():
                         p.requires_grad = False  # to avoid computation
-                    self._optimizeG()
+                    self._optimizeG(batch, optG)
 
 
     def _optimizeG(self, batch, opt, grad_clip:int=10):
-        one = torch.FloatTensor([1])
-        X_p, X_f = batch[0], batch[1]
+        X_p, X_f = [batch[key].float().to(self.device) for key in ['X_p', 'X_f']]
         batch_size = X_p.size(0)
 
         # real data
-        X_f_enc, X_f_dec = netD(X_f)
+        X_f_enc, X_f_dec = self.netD(X_f)
 
         # fake data
-        noise = torch.cuda.FloatTensor(1, batch_size, args.RNN_hid_dim).normal_(0, 1)
+        noise = torch.FloatTensor(1, batch_size, self.RNN_hid_dim).normal_(0, 1).to(self.device)
         noise = Variable(noise)
-        Y_f = netG(X_p, X_f, noise)
-        Y_f_enc, Y_f_dec = netD(Y_f)
+        Y_f = self.netG(X_p, X_f, noise)
+        Y_f_enc, Y_f_dec = self.netD(Y_f)
 
         # batchwise MMD2 loss between X_f and Y_f
-        G_mmd2 = batch_mmd2_loss(X_f_enc, Y_f_enc, sigma_var)
+        G_mmd2 = self.__mmd2_loss(X_f_enc, Y_f_enc)
 
         # update netG
-        netG.zero_grad()
+        self.netG.zero_grad()
         lossG = G_mmd2.mean()
         #lossG = 0.0 * G_mmd2.mean()
-        lossG.backward(one)
+        lossG.backward()
 
         torch.nn.utils.clip_grad_norm_(self.netG.parameters(), grad_clip)
 
@@ -190,38 +201,44 @@ class KL_CPD(nn.Module):
 
 
     def _optimizeD(self, batch, opt, grad_clip:int=10):
-        one = torch.cuda.FloatTensor([1])
-        mone = one * -1
-
-        X_p, X_f, Y_true = batch[0], batch[1], batch[2]
+        X_p, X_f, Y_true = [batch[key].float().to(self.device) for key in ['X_p', 'X_f', 'Y']]
         batch_size = X_p.size(0)
 
         # real data
-        X_p_enc, X_p_dec = netD(X_p)
-        X_f_enc, X_f_dec = netD(X_f)
+        X_p_enc, X_p_dec = self.netD(X_p)
+        X_f_enc, X_f_dec = self.netD(X_f)
 
         # fake data
-        noise = torch.FloatTensor(1, batch_size, args.RNN_hid_dim).normal_(0, 1).to(self.device)
+        noise = torch.FloatTensor(1, batch_size, self.netG.RNN_hid_dim).normal_(0, 1).to(self.device)
         noise = Variable(noise, volatile=True) # total freeze netG
-        Y_f = Variable(netG(X_p, X_f, noise).data)
-        Y_f_enc, Y_f_dec = netD(Y_f)
+        Y_f = Variable(self.netG(X_p, X_f, noise).data)
+        Y_f_enc, Y_f_dec = self.netD(Y_f)
 
         # batchwise MMD2 loss between X_f and Y_f
-        D_mmd2 = batch_mmd2_loss(X_f_enc, Y_f_enc, sigma_var)
+        D_mmd2 = self.__mmd2_loss(X_f_enc, Y_f_enc)
 
         # batchwise MMD loss between X_p and X_f
-        mmd2_real = batch_mmd2_loss(X_p_enc, X_f_enc, sigma_var)
+        mmd2_real = self.__mmd2_loss(X_p_enc, X_f_enc)
 
         # reconstruction loss
         real_L2_loss = torch.mean((X_f - X_f_dec)**2)
         fake_L2_loss = torch.mean((Y_f - Y_f_dec)**2)
 
         # update netD
-        netD.zero_grad()
+        self.netD.zero_grad()
         lossD = D_mmd2.mean() - self.lambda_ae * (real_L2_loss + fake_L2_loss) - self.lambda_real * mmd2_real.mean()
-        lossD.backward(mone)
+        lossD = -lossD
+        lossD.backward()
 
         torch.nn.utils.clip_grad_norm_(self.netD.parameters(), grad_clip)
 
         opt.step()
 
+if __name__ == '__main__':
+    dim, seq_length = 1, 100
+    ts = np.random.randn(seq_length,dim)
+    device = torch.device('cuda')
+    model = KL_CPD(dim).to(device)
+    model.fit(ts)
+    preds = model.predict(ts)
+    print(preds)

@@ -22,6 +22,7 @@ class HankelDataset(Dataset):
         self.f_wnd_dim = f_wnd_dim
         self.sub_dim = sub_dim
 
+        if len(ts.shape) == 1: ts = np.expand_dims(ts, -1)
         self.Y = ts # Timeseries
         self.T, self.D = ts.shape # T: time length; D: variable dimension
         self.var_dim = self.D * self.sub_dim
@@ -60,7 +61,6 @@ class HankelDataset(Dataset):
             self.Y_hankel[:, :], # timeseries
             np.tile(self.Y_hankel[-1:,:], (self.f_wnd_dim, 1)), # right padding
             ])
-        print(data[:self.p_wnd_dim+1])
         return {
             'X_p': torch.from_numpy(data[idx:idx+self.p_wnd_dim, :]),
             'X_f': torch.from_numpy(data[idx+self.p_wnd_dim:idx+self.p_wnd_dim+self.f_wnd_dim, :]),
