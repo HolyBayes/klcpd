@@ -22,6 +22,10 @@ print(preds)
 
 ## Installation
 
+```
+pip install git+https://github.com/HolyBayes/klcpd
+```
+
 ## Authors
 
     @article{chang2019kernel,
